@@ -1,4 +1,14 @@
 # build-debian-qemu-image
+Please see https://github.com/loz-hurst/build-debian-qemu-image for original code. This is a fork to customize build. You will need to export:
+
+- export IMG_TYPE=raw or qcow2
+- export ROOT_PASSWD=your_passwd
+- export DEBIAN_REPO=http://your_closest_repo
+- export DBSTRAP_INCLUDE=your,desired,packages,to,include
+- export CITY_TIME=eg Warsaw, Berlin or London
+- Additionaly create empty custom-steps.sh file and place there a custom steps (user configuration, additional apt, etc..) in form of a bash script.
+
+-------------------------------------------------------------------------
 
 Script to bootstrapping qemu UEFI Debian images with debootstrap
 
