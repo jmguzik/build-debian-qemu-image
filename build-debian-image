@@ -68,7 +68,7 @@ name:      hostname to configure the image to, defaults to debian-<suite>
 EOF
 }
 
-while getopts ":hSDMs:f:z:r:d:" opt;
+while getopts ":hSDMs:f:z:w:r:d:" opt;
 do
 	case $opt in
 		h )
@@ -88,6 +88,9 @@ do
 		z )
 			SIZE="$OPTARG"
 			;;
+        	w )
+            		SWAP_SIZE="$OPTARG"
+            		;;
 		r )
 			ROOT_PASSWD="$( eval "echo \${$OPTARG}" )"
 			;;
@@ -116,7 +119,7 @@ NAME="$1"
 # Set defaults for anything not set
 [[ -z $SUITE ]] && SUITE="$DEFAULT_SUITE"
 [[ -z $NAME ]] && NAME="debian-$SUITE"
-[[ -z $FILE ]] && FILE="$NAME.qcow2"
+[[ -z $FILE ]] && FILE="$NAME.$IMG_TYPE"
 [[ -z $SIZE ]] && SIZE="$DEFAULT_SIZE"
 [[ -z $DOMAIN_NAME ]] && DOMAIN_NAME="$DEFAULT_DOMAIN"
 [[ -z $SWAP_SIZE ]] && SWAP_SIZE="$DEFAULT_SWAP"
@@ -141,7 +144,7 @@ set -e
 if [[ -z "$SKIP_DEBOOTSTRAP" ]]
 then
 	echo "Creating image"
-	qemu-img create -f qcow2 $FILE $SIZE
+	qemu-img create -f $IMG_TYPE $FILE $SIZE
 else
 	if ! [[ -f $FILE ]]
 	then
@@ -165,7 +168,7 @@ then
 fi
 
 echo "Mounting image on $NBD_DEV"
-qemu-nbd -c $NBD_DEV $FILE
+qemu-nbd -f $IMG_TYPE -c $NBD_DEV $FILE
 
 PARTED_COMMANDS="mklabel gpt \
 mkpart primary fat32 1MiB $(( 1 + EFI_SIZE ))MiB \
@@ -232,12 +235,15 @@ mount $ROOT_UUID /mnt
 [[ -d /mnt/boot/efi ]] || mkdir -p /mnt/boot/efi
 mount $EFI_UUID /mnt/boot/efi
 
+echo "Copying custom config steps"
+cp custom-steps.sh /mnt/
+
 # The main debootstrap - skip if requested
 if [[ -z "$SKIP_DEBOOTSTRAP" ]]
 then
 	echo "Bootstrapping debian"
 	# XXX Hardcoded to x86_64 architecture but at the moment I do not want to run anything else.
-	debootstrap --arch amd64 --include=salt-minion $SUITE /mnt http://ftp.uk.debian.org/debian
+	debootstrap --arch amd64 --include=$DBSTRAP_INCLUDE $SUITE /mnt $DEBIAN_REPO
 fi
 
 echo "Mounting proc, dev and sys"
@@ -277,7 +283,7 @@ echo "--------------------------------------------"
 echo "Setting timezone"
 debconf-set-selections <<S2EOF
 tzdata tzdata/Areas select Europe
-tzdata tzdata/Zones/Europe select London
+tzdata tzdata/Zones/Europe select $CITY_TIME
 S2EOF
 # This is necessary as tzdata will assume these are manually set and override the debconf values with their settings
 rm -f /etc/localtime /etc/timezone
@@ -293,10 +299,10 @@ auto lo
 iface lo inet loopback
 S2EOF
 
-echo "...enp1s0"
-cat - >/etc/network/interfaces.d/enp1s0 <<S2EOF
-allow-hotplug enp1s0
-iface enp1s0 inet dhcp
+echo "...$IFACE_NAME"
+cat - >/etc/network/interfaces.d/$IFACE_NAME <<S2EOF
+allow-hotplug $IFACE_NAME
+iface $IFACE_NAME inet dhcp
 S2EOF
 
 echo "Configuring hostname"
@@ -317,16 +323,20 @@ echo "--------------------------------------------"
 
 echo "Configuring apt sources"
 
+curl -fsSL https://download.docker.com/linux/debian/gpg | apt-key add -
+
 cat - >/etc/apt/sources.list <<S2EOF
-deb http://ftp.uk.debian.org/debian/ buster main
-deb-src http://ftp.uk.debian.org/debian/ buster main
+deb http://ftp.pl.debian.org/debian/ buster main
+deb-src http://ftp.pl.debian.org/debian/ buster main
 
 deb http://security.debian.org/debian-security buster/updates main
 deb-src http://security.debian.org/debian-security buster/updates main
 
 # buster-updates, previously known as 'volatile'
-deb http://ftp.uk.debian.org/debian/ buster-updates main
-deb-src http://ftp.uk.debian.org/debian/ buster-updates main
+deb http://ftp.pl.debian.org/debian/ buster-updates main
+deb-src http://ftp.pl.debian.org/debian/ buster-updates main
+deb http://deb.debian.org/debian buster-backports main
+deb [arch=amd64] https://download.docker.com/linux/debian buster stable
 S2EOF
 
 apt-get -qq -y update
@@ -352,14 +362,14 @@ apt-get -qq -y install linux-image-amd64
 
 echo "--------------------------------------------"
 
+echo "Installing Docker Engine"
+apt-get -qq -y install docker-ce docker-ce-cli containerd.io
+
+echo "--------------------------------------------"
+
 echo "Installing bootloader"
 apt-get -qq -y install grub-efi-amd64
 # Add console=ttyS0 so we get early boot messages on the serial console.
-sed -i -e 's/^\\(GRUB_CMDLINE_LINUX="[^"]*\\)"$/\\1 console=ttyS0"/' /etc/default/grub
-cat - >>/etc/default/grub <<S2EOF
-GRUB_TERMINAL="serial"
-GRUB_SERIAL_COMMAND="serial --unit=0 --speed=9600 --stop=1"
-S2EOF
 grub-install --target=x86_64-efi
 update-grub
 
@@ -369,18 +379,16 @@ cp /boot/efi/EFI/debian/fbx64.efi /boot/efi/EFI/BOOT/bootx64.efi
 
 echo "--------------------------------------------"
 
-echo "Enabling serial console"
-systemctl enable serial-getty@ttyS0.service
-
-echo "--------------------------------------------"
-
 if [[ -n '$ROOT_PASSWD' ]]
 then
 	echo "Setting root password"
-	echo 'root:$ROOT_PASSWD' | chpasswd -e
+	printf 'root:$ROOT_PASSWD' | chpasswd -e
 	echo "--------------------------------------------"
 fi
 
+chmod +x /custom-steps.sh
+bash /custom-steps.sh
+rm -rf /custom-steps.sh
 echo "Tidying..."
 apt-get clean
 
